@@ -11,7 +11,26 @@
 #include <vector>
 #include <format>
 #include <optional>
-#include "./litexml_export.h"
+
+#ifdef _WIN32
+    #ifdef LITEXML_EXPORTING
+        #define LITEXML_API __declspec(dllexport)
+    #else
+        #define LITEXML_API __declspec(dllimport)
+    #endif
+#else
+    #ifdef LITEXML_EXPORTING
+        #define LITEXML_API __attribute__((visibility("default")))
+    #else
+        #define LITEXML_API
+    #endif
+#endif
+
+// 静态库时不需要导出宏
+#ifdef LITEXML_STATIC
+    #undef LITEXML_API
+    #define LITEXML_API
+#endif
 
 namespace litexml {
 
