@@ -11,6 +11,7 @@
 #include <vector>
 #include <format>
 #include <optional>
+#include "./litexml_export.h"
 
 namespace litexml {
 
@@ -35,7 +36,7 @@ struct ParseResult {
 template<typename T>
 using ParseResultT = std::expected<T, ParseResult>;
 
-class XMLParser {
+class  LITEXML_API XMLParser {
 public:
     struct Config {
         bool preserveWhitespace{false};
