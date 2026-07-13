@@ -2,32 +2,47 @@
 
 @PACKAGE_INIT@
 
-# 设置库的包含路径
-set_and_check(LITEXML_INCLUDE_DIR "@PACKAGE_CMAKE_INSTALL_FULL_INCLUDEDIR@")
+# 获取安装路径
+get_filename_component(LITEXML_CMAKE_DIR "${CMAKE_CURRENT_LIST_FILE}" PATH)
+get_filename_component(LITEXML_INSTALL_PREFIX "${LITEXML_CMAKE_DIR}/../../../" ABSOLUTE)
+
+# 设置包含路径
+set(LITEXML_INCLUDE_DIR "${LITEXML_INSTALL_PREFIX}/include/litexml")
+
+# 检查包含目录是否存在
+if(NOT EXISTS "${LITEXML_INCLUDE_DIR}")
+    set(LITEXML_FOUND FALSE)
+    message(STATUS "litexml: Include directory not found at ${LITEXML_INCLUDE_DIR}")
+    return()
+endif()
 
 # 查找库文件
 find_library(LITEXML_LIBRARY
     NAMES litexml
-    PATHS "@PACKAGE_CMAKE_INSTALL_FULL_LIBDIR@"
+    PATHS "${LITEXML_INSTALL_PREFIX}/lib"
     NO_DEFAULT_PATH
 )
 
-# 检查是否找到库
+# 如果没找到，尝试在当前目录查找
+if(NOT LITEXML_LIBRARY)
+    find_library(LITEXML_LIBRARY
+        NAMES litexml
+        PATHS "${LITEXML_CMAKE_DIR}/../../"
+        NO_DEFAULT_PATH
+    )
+endif()
+
+# 检查库文件是否存在
 if(NOT LITEXML_LIBRARY)
     set(LITEXML_FOUND FALSE)
-    set(LITEXML_FOUND "Could NOT find litexml library" PARENT_SCOPE)
+    message(STATUS "litexml: Library not found")
     return()
 endif()
 
-# 设置完整的库路径
+# 设置库变量
 set(LITEXML_LIBRARIES ${LITEXML_LIBRARY})
 
-# 处理静态库和动态库的选择
-if(NOT LITEXML_USE_SHARED_LIBS)
-    set(LITEXML_USE_SHARED_LIBS OFF CACHE BOOL "Use shared library")
-endif()
-
-# 定义导入目标
+# 创建导入目标
 if(NOT TARGET litexml::litexml)
     add_library(litexml::litexml UNKNOWN IMPORTED)
     set_target_properties(litexml::litexml PROPERTIES
@@ -35,27 +50,17 @@ if(NOT TARGET litexml::litexml)
         INTERFACE_INCLUDE_DIRECTORIES "${LITEXML_INCLUDE_DIR}"
         INTERFACE_COMPILE_DEFINITIONS "LITEXML_STATIC"
     )
-    
-    # 如果是共享库，添加相应的定义
-    if(LITEXML_USE_SHARED_LIBS)
-        set_target_properties(litexml::litexml PROPERTIES
-            INTERFACE_COMPILE_DEFINITIONS "LITEXML_SHARED"
-        )
-    endif()
 endif()
 
-# 设置版本信息
+# 设置版本
 set(LITEXML_VERSION "@PROJECT_VERSION@")
 
-# 检查所有必需的组件
+# 处理查找结果
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(litexml
     REQUIRED_VARS LITEXML_INCLUDE_DIR LITEXML_LIBRARY
     VERSION_VAR LITEXML_VERSION
 )
 
-# 导出变量到父作用域
-set(LITEXML_FOUND ${LITEXML_FOUND} PARENT_SCOPE)
-set(LITEXML_INCLUDE_DIR ${LITEXML_INCLUDE_DIR} PARENT_SCOPE)
-set(LITEXML_LIBRARIES ${LITEXML_LIBRARIES} PARENT_SCOPE)
-set(LITEXML_VERSION ${LITEXML_VERSION} PARENT_SCOPE)
+# 设置标志
+set(LITEXML_FOUND ${LITEXML_FOUND})
