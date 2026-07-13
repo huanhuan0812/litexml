@@ -13,7 +13,7 @@
 #include <algorithm>
 #include <iterator>
 #include <cstring>
-#include <cctype>  // 新增
+#include <cctype>
 
 namespace litexml {
 
@@ -36,7 +36,6 @@ class DocumentAllocator {
             b.used = 0;
             blocks.push_back(std::move(b));
         }
-        
         Block& current = blocks.back();
         size_t ptr_val = reinterpret_cast<size_t>(current.data.get() + current.used);
         size_t aligned_ptr_val = (ptr_val + alignment - 1) & ~(alignment - 1);
@@ -51,7 +50,6 @@ class DocumentAllocator {
             blocks.push_back(std::move(b));
             return allocate(size, alignment);
         }
-        
         current.used += padding;
         void* ptr = current.data.get() + current.used;
         current.used += size;
@@ -65,19 +63,17 @@ public:
         return new (mem) T(std::forward<Args>(args)...);
     }
 
-    // 将字符串拷贝到内存池中，返回 string_view
     std::string_view intern(std::string_view sv) {
         if (sv.empty()) return {};
         void* mem = allocate(sv.size(), 1);
         std::memcpy(mem, sv.data(), sv.size());
         return std::string_view(static_cast<char*>(mem), sv.size());
     }
-    
+
     std::string_view intern(const std::string& str) {
         return intern(std::string_view(str));
     }
 
-    // 新增：带预分配大小的 intern
     std::string_view intern_with_size(std::string_view sv, size_t size_hint) {
         if (sv.empty()) return {};
         void* mem = allocate(size_hint, 1);
@@ -91,7 +87,6 @@ enum class NodeType : uint8_t {
     Document, Element, Text, CData, Comment, ProcessingInstruction
 };
 
-// 属性类型 - 使用 string_view 实现零拷贝
 using AttributeMap = std::unordered_map<std::string_view, std::string_view>;
 
 class DOMNode;
@@ -102,15 +97,15 @@ class DocumentNode;
 class DOMNode {
 public:
     NodeType type;
-    std::string_view nodeName;   // 零拷贝
-    std::string_view nodeValue;  // 零拷贝
+    std::string_view nodeName;   
+    std::string_view nodeValue;  
     DOMNode* parent{nullptr};
-    std::vector<DOMNode*> children; // 使用原始指针，生命周期由 DocumentNode 统一管理
+    std::vector<DOMNode*> children; 
     DocumentNode* document{nullptr};
 
     explicit DOMNode(NodeType t = NodeType::Element) noexcept : type(t) {}
     virtual ~DOMNode() = default;
-
+    
     DOMNode(const DOMNode&) = delete;
     DOMNode& operator=(const DOMNode&) = delete;
     DOMNode(DOMNode&&) = default;
@@ -135,6 +130,61 @@ public:
         return children.back();
     }
 
+    // ==================== 新增：DOM 遍历方法 ====================
+    [[nodiscard]] DOMNode* getParent() const noexcept {
+        return parent;
+    }
+
+    [[nodiscard]] std::optional<DOMNode*> getNextSibling() const noexcept {
+        if (!parent) return std::nullopt;
+        auto& siblings = parent->children;
+        for (size_t i = 0; i < siblings.size(); ++i) {
+            if (siblings[i] == this && i + 1 < siblings.size()) {
+                return siblings[i + 1];
+            }
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] std::optional<DOMNode*> getPreviousSibling() const noexcept {
+        if (!parent) return std::nullopt;
+        auto& siblings = parent->children;
+        for (size_t i = 1; i < siblings.size(); ++i) {
+            if (siblings[i] == this) {
+                return siblings[i - 1];
+            }
+        }
+        return std::nullopt;
+    }
+
+    // ==================== 新增：DOM 修改方法 ====================
+    bool removeChild(DOMNode* child) {
+        if (!child) return false;
+        auto it = std::find(children.begin(), children.end(), child);
+        if (it != children.end()) {
+            children.erase(it);
+            child->parent = nullptr;
+            child->~DOMNode(); // 手动调用虚析构函数释放派生类资源
+            return true;
+        }
+        return false;
+    }
+
+    bool replaceChild(DOMNode* newChild, DOMNode* oldChild) {
+        if (!newChild || !oldChild) return false;
+        auto it = std::find(children.begin(), children.end(), oldChild);
+        if (it != children.end()) {
+            *it = newChild;
+            newChild->parent = this;
+            newChild->document = this->document;
+            
+            oldChild->parent = nullptr;
+            oldChild->~DOMNode();
+            return true;
+        }
+        return false;
+    }
+
     template<typename Predicate>
     [[nodiscard]] std::optional<DOMNode*> findChild(Predicate pred) const {
         auto it = std::ranges::find_if(children, pred);
@@ -155,6 +205,8 @@ public:
     explicit ElementNode(std::string_view name) : DOMNode(NodeType::Element) {
         nodeName = name;
     }
+    
+    ~ElementNode() override = default; 
 
     [[nodiscard]] std::string_view getTagName() const noexcept { return nodeName; }
 
@@ -183,7 +235,9 @@ public:
     explicit TextNode(std::string_view text) : DOMNode(NodeType::Text) { nodeValue = text; }
     [[nodiscard]] std::string_view getText() const noexcept { return nodeValue; }
     [[nodiscard]] bool isEmpty() const noexcept {
-        return nodeValue.empty() || std::ranges::all_of(nodeValue, [](char c) { return std::isspace(static_cast<unsigned char>(c)); });
+        return nodeValue.empty() || std::ranges::all_of(nodeValue, [](char c) { 
+            return std::isspace(static_cast<unsigned char>(c)); 
+        });
     }
 };
 
@@ -203,13 +257,43 @@ class DocumentNode : public DOMNode {
 private:
     std::string_view m_encoding;
     std::string_view m_version;
-    DocumentAllocator allocator; // 内存池
-    std::unique_ptr<std::string> m_ownedBuffer; // 用于 parseFile 时持有原始数据所有权
+    DocumentAllocator allocator; 
+    std::unique_ptr<std::string> m_ownedBuffer; 
 
     static void destroyTree(DOMNode* node) {
         for (auto* child : node->children) {
             destroyTree(child);
-            child->~DOMNode(); // 调用虚析构函数释放派生类资源
+            child->~DOMNode(); 
+        }
+    }
+
+    // 查询辅助方法
+    void findElementsById(const DOMNode* node, std::string_view id, ElementNode*& result) const {
+        if (!node || result) return;
+        if (node->type == NodeType::Element) {
+            auto* elem = static_cast<const ElementNode*>(node);
+            auto attr = elem->getAttribute("id");
+            if (attr.has_value() && attr.value() == id) {
+                result = const_cast<ElementNode*>(elem);
+                return;
+            }
+        }
+        for (auto* child : node->children) {
+            findElementsById(child, id, result);
+            if (result) return; 
+        }
+    }
+
+    void findElementsByTagName(const DOMNode* node, std::string_view tagName, std::vector<ElementNode*>& result) const {
+        if (!node) return;
+        if (node->type == NodeType::Element) {
+            auto* elem = static_cast<const ElementNode*>(node);
+            if (tagName == "*" || elem->getTagName() == tagName) {
+                result.push_back(const_cast<ElementNode*>(elem));
+            }
+        }
+        for (auto* child : node->children) {
+            findElementsByTagName(child, tagName, result);
         }
     }
 
@@ -220,33 +304,48 @@ public:
     }
     
     ~DocumentNode() {
-        destroyTree(this); // 统一销毁整棵树
+        destroyTree(this); 
     }
 
     void setEncoding(std::string_view encoding) { m_encoding = encoding; }
     void setVersion(std::string_view version) { m_version = version; }
-    
+
     [[nodiscard]] std::optional<std::string_view> getEncoding() const noexcept {
         return m_encoding.empty() ? std::nullopt : std::optional(m_encoding);
     }
+
     [[nodiscard]] std::optional<std::string_view> getVersion() const noexcept {
         return m_version.empty() ? std::nullopt : std::optional(m_version);
     }
 
     [[nodiscard]] ElementNode* getDocumentElement() const {
-        auto it = std::ranges::find_if(children, [](const auto& child) { return child->type == NodeType::Element; });
+        auto it = std::ranges::find_if(children, [](const auto& child) { 
+            return child->type == NodeType::Element; 
+        });
         if (it == children.end()) return nullptr;
         return static_cast<ElementNode*>(*it);
     }
-    
+
     [[nodiscard]] auto getAllElements() const {
         return children
         | std::views::filter([](const auto& child) { return child->type == NodeType::Element; })
         | std::views::transform([](const auto& child) -> ElementNode* { return static_cast<ElementNode*>(child); });
     }
-    
+
+    // ==================== 新增：DOM 查询方法 ====================
+    [[nodiscard]] ElementNode* getElementById(std::string_view id) const {
+        ElementNode* result = nullptr;
+        findElementsById(this, id, result);
+        return result;
+    }
+
+    [[nodiscard]] std::vector<ElementNode*> getElementsByTagName(std::string_view tagName) const {
+        std::vector<ElementNode*> result;
+        findElementsByTagName(this, tagName, result);
+        return result;
+    }
+
     DocumentAllocator& getAllocator() { return allocator; }
-    
     void setOwnedBuffer(std::unique_ptr<std::string> buffer) { m_ownedBuffer = std::move(buffer); }
     std::string* getOwnedBuffer() { return m_ownedBuffer.get(); }
 };
