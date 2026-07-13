@@ -1,15 +1,14 @@
+// xml_parser.h
 #ifndef LITEXML_XML_PARSER_H
 #define LITEXML_XML_PARSER_H
 
 #include "dom_node.h"
+#include "entity_table.h"
 #include <string>
 #include <memory>
 #include <string_view>
 #include <expected>
-#include <source_location>
-#include <concepts>
-#include <ranges>
-#include <charconv>
+#include <vector>
 #include <format>
 #include <fstream>
 #include <optional>
@@ -62,50 +61,71 @@ private:
         size_t position{0};
         Config config;
         DocumentNode* document;
-        std::vector<std::string_view> tagStack; // 零拷贝标签栈
-
+        std::vector<std::string_view> tagStack;
+        TextAccumulator text_accumulator;  // 直接成员，避免指针开销
+        
         explicit ParseState(std::string_view xml, const Config& cfg, DocumentNode* doc)
-            : input(xml), config(cfg), document(doc) {
+            : input(xml), config(cfg), document(doc), 
+              text_accumulator(&doc->getAllocator()) {
             tagStack.reserve(32);
+            text_accumulator.reserve(2048);  // 预分配更大缓冲区
+        }
+        
+        // 获取文本累加器（自动重置）
+        inline TextAccumulator& get_text_accumulator() {
+            text_accumulator.clear();
+            return text_accumulator;
         }
 
-        [[nodiscard]] bool atEnd() const noexcept { return position >= input.length(); }
-        [[nodiscard]] char current() const noexcept { return atEnd() ? '\0' : input[position]; }
-        [[nodiscard]] char peek(size_t offset = 1) const noexcept {
+        [[nodiscard]] inline bool atEnd() const noexcept { 
+            return position >= input.length(); 
+        }
+        
+        [[nodiscard]] inline char current() const noexcept { 
+            return atEnd() ? '\0' : input[position]; 
+        }
+        
+        [[nodiscard]] inline char peek(size_t offset = 1) const noexcept {
             size_t idx = position + offset;
             return idx < input.length() ? input[idx] : '\0';
         }
-        void advance(size_t n = 1) noexcept { position = std::min(position + n, input.length()); }
+        
+        inline void advance(size_t n = 1) noexcept { 
+            position = std::min(position + n, input.length()); 
+        }
+        
         void skipWhitespace() noexcept;
 
         [[nodiscard]] std::optional<std::string_view> parseName() noexcept;
         [[nodiscard]] std::optional<std::string_view> parseQuotedString() noexcept;
         [[nodiscard]] std::optional<std::string_view> parseUntil(char delimiter) noexcept;
 
-        [[nodiscard]] bool startsWith(std::string_view str) const noexcept {
+        [[nodiscard]] inline bool startsWith(std::string_view str) const noexcept {
             return input.substr(position).starts_with(str);
         }
     };
 
     Config m_config;
 
-    ParseResultT<std::unique_ptr<DocumentNode>> parseInternal(std::string_view xml, std::unique_ptr<DocumentNode> doc) noexcept;
+    ParseResultT<std::unique_ptr<DocumentNode>> parseInternal(std::string_view xml, 
+                                                               std::unique_ptr<DocumentNode> doc) noexcept;
     
     ParseResult parseDocument(ParseState& state) noexcept;
     ParseResult parseProlog(ParseState& state) noexcept;
     ParseResult parseElement(ParseState& state, DOMNode* parent) noexcept;
     ParseResult parseContent(ParseState& state, DOMNode* parent) noexcept;
-    ParseResult parseText(ParseState& state, DOMNode* parent) noexcept;
+    ParseResult parseTextOptimized(ParseState& state, DOMNode* parent) noexcept;
     ParseResult parseCDATA(ParseState& state, DOMNode* parent) noexcept;
     ParseResult parseComment(ParseState& state, DOMNode* parent) noexcept;
     ParseResult parseProcessingInstruction(ParseState& state, DOMNode* parent) noexcept;
     ParseResult parseAttributes(ParseState& state, ElementNode* element) noexcept;
     ParseResult parseClosingTag(ParseState& state, std::string_view tagName) noexcept;
 
-    [[nodiscard]] std::string unescapeXML(std::string_view text) const noexcept;
-    [[nodiscard]] std::string_view internOrOriginal(ParseState& state, std::string_view text);
+    // 辅助方法
+    [[nodiscard]] inline bool isWhitespaceOnly(std::string_view text) const noexcept;
     [[nodiscard]] bool isValidName(std::string_view name) const noexcept;
-    ParseResult makeError(ParseError error, std::string_view message, std::optional<size_t> pos = std::nullopt) const noexcept;
+    ParseResult makeError(ParseError error, std::string_view message, 
+                          std::optional<size_t> pos = std::nullopt) const noexcept;
 };
 
 } // namespace litexml

@@ -1,4 +1,6 @@
+// xml_parser.cpp
 #include "xml_parser.h"
+#include "entity_table.h"
 #include <fstream>
 #include <sstream>
 #include <cctype>
@@ -7,9 +9,11 @@
 
 namespace litexml {
 
+// ==================== 构造函数 ====================
 XMLParser::XMLParser(const Config& config) : m_config(config) {}
 XMLParser::XMLParser() : m_config(Config{}) {}
 
+// ==================== ParseState 方法 ====================
 void XMLParser::ParseState::skipWhitespace() noexcept {
     while (!atEnd() && std::isspace(static_cast<unsigned char>(current()))) {
         advance();
@@ -58,8 +62,24 @@ std::optional<std::string_view> XMLParser::ParseState::parseUntil(char delimiter
     return input.substr(start, position - start);
 }
 
-ParseResult XMLParser::makeError(ParseError error, std::string_view message, std::optional<size_t> pos) const noexcept {
+// ==================== 辅助函数 ====================
+ParseResult XMLParser::makeError(ParseError error, std::string_view message, 
+                                  std::optional<size_t> pos) const noexcept {
     return ParseResult{.error = error, .message = std::string(message), .position = pos};
+}
+
+inline bool XMLParser::isWhitespaceOnly(std::string_view text) const noexcept {
+    return std::ranges::all_of(text, [](char c) {
+        return std::isspace(static_cast<unsigned char>(c));
+    });
+}
+
+bool XMLParser::isValidName(std::string_view name) const noexcept {
+    if (name.empty()) return false;
+    if (!std::isalpha(static_cast<unsigned char>(name[0])) && name[0] != '_') return false;
+    return std::ranges::all_of(name.substr(1), [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.';
+    });
 }
 
 // ==================== 核心解析入口 ====================
@@ -73,25 +93,27 @@ ParseResultT<std::unique_ptr<DocumentNode>> XMLParser::parseFile(std::string_vie
         std::string filenameStr(filename);
         std::ifstream file(filenameStr, std::ios::binary | std::ios::ate);
         if (!file.is_open()) {
-            return std::unexpected(makeError(ParseError::FileNotFound, std::format("Cannot open file: {}", filename)));
+            return std::unexpected(makeError(ParseError::FileNotFound, 
+                std::format("Cannot open file: {}", filename)));
         }
         std::streamsize size = file.tellg();
         file.seekg(0, std::ios::beg);
         
-        auto buffer = std::make_unique<std::string>(size, '\0');
+        auto buffer = std::make_unique<std::string>(static_cast<size_t>(size), '\0');
         if (!file.read(buffer->data(), size)) {
             return std::unexpected(makeError(ParseError::IOError, "Failed to read file"));
         }
         
         auto doc = std::make_unique<DocumentNode>();
-        doc->setOwnedBuffer(std::move(buffer)); // 让 Document 拥有原始数据
+        doc->setOwnedBuffer(std::move(buffer));
         return parseInternal(*doc->getOwnedBuffer(), std::move(doc));
     } catch (const std::exception& e) {
         return std::unexpected(makeError(ParseError::IOError, e.what()));
     }
 }
 
-ParseResultT<std::unique_ptr<DocumentNode>> XMLParser::parseInternal(std::string_view xml, std::unique_ptr<DocumentNode> doc) noexcept {
+ParseResultT<std::unique_ptr<DocumentNode>> XMLParser::parseInternal(std::string_view xml, 
+                                                                      std::unique_ptr<DocumentNode> doc) noexcept {
     try {
         ParseState state(xml, m_config, doc.get());
         if (state.startsWith("\xEF\xBB\xBF")) state.advance(3);
@@ -137,7 +159,7 @@ ParseResult XMLParser::parseProlog(ParseState& state) noexcept {
     }
     if (state.current() == '?' && state.peek() == '>') {
         state.position += 2;
-        return ParseResult{ParseError::Success};
+        return ParseResult{ParseError::Success, "", std::nullopt};
     }
     return makeError(ParseError::InvalidProlog, "Expected '?>'", state.position);
 }
@@ -145,8 +167,9 @@ ParseResult XMLParser::parseProlog(ParseState& state) noexcept {
 ParseResult XMLParser::parseContent(ParseState& state, DOMNode* parent) noexcept {
     while (!state.atEnd()) {
         if (state.current() == '<') {
-            if (state.peek() == '/') return ParseResult{ParseError::Success};
-            else if (state.peek() == '!') {
+            if (state.peek() == '/') {
+                return ParseResult{ParseError::Success, "", std::nullopt};
+            } else if (state.peek() == '!') {
                 if (state.startsWith("<!--")) {
                     auto result = parseComment(state, parent);
                     if (!result.isSuccess()) return result;
@@ -155,7 +178,9 @@ ParseResult XMLParser::parseContent(ParseState& state, DOMNode* parent) noexcept
                     if (!result.isSuccess()) return result;
                 } else {
                     size_t end = state.input.find('>', state.position + 1);
-                    if (end == std::string_view::npos) return makeError(ParseError::UnexpectedEOF, "Unclosed DOCTYPE", state.position);
+                    if (end == std::string_view::npos) {
+                        return makeError(ParseError::UnexpectedEOF, "Unclosed DOCTYPE", state.position);
+                    }
                     state.position = end + 1;
                 }
             } else if (state.peek() == '?') {
@@ -164,7 +189,9 @@ ParseResult XMLParser::parseContent(ParseState& state, DOMNode* parent) noexcept
                     if (!result.isSuccess()) return result;
                 } else {
                     size_t end = state.input.find("?>", state.position + 2);
-                    if (end == std::string_view::npos) return makeError(ParseError::UnexpectedEOF, "Unclosed PI", state.position);
+                    if (end == std::string_view::npos) {
+                        return makeError(ParseError::UnexpectedEOF, "Unclosed PI", state.position);
+                    }
                     state.position = end + 2;
                 }
             } else {
@@ -172,13 +199,117 @@ ParseResult XMLParser::parseContent(ParseState& state, DOMNode* parent) noexcept
                 if (!result.isSuccess()) return result;
             }
         } else {
-            auto result = parseText(state, parent);
+            auto result = parseTextOptimized(state, parent);
             if (!result.isSuccess()) return result;
         }
     }
-    return ParseResult{ParseError::Success};
+    return ParseResult{ParseError::Success, "", std::nullopt};
 }
 
+// ==================== 优化后的文本解析 ====================
+ParseResult XMLParser::parseTextOptimized(ParseState& state, DOMNode* parent) noexcept {
+    // 快速检测：是否包含实体
+    size_t start = state.position;
+    bool has_entity = false;
+    
+    // 第一遍：快速扫描，只找 '&'
+    // size_t scan_pos = state.position;
+    while (!state.atEnd() && state.current() != '<') {
+        if (state.current() == '&') {
+            has_entity = true;
+            break;
+        }
+        state.advance();
+    }
+    
+    // 如果没有实体，直接使用零拷贝
+    if (!has_entity) {
+        // 回退到开始位置，重新提取文本
+        state.position = start;
+        while (!state.atEnd() && state.current() != '<') {
+            state.advance();
+        }
+        
+        if (start == state.position) {
+            return ParseResult{ParseError::Success, "", std::nullopt};
+        }
+        
+        std::string_view text = state.input.substr(start, state.position - start);
+        
+        // 空白处理
+        if (!m_config.preserveWhitespace && isWhitespaceOnly(text)) {
+            return ParseResult{ParseError::Success, "", std::nullopt};
+        }
+        
+        auto textNode = state.document->getAllocator().create<TextNode>(text);
+        parent->appendChild(textNode);
+        return ParseResult{ParseError::Success, "", std::nullopt};
+    }
+    
+    // 有实体，需要解码
+    state.position = start;  // 重置位置
+    auto& accumulator = state.get_text_accumulator();
+    
+    while (!state.atEnd() && state.current() != '<') {
+        if (state.current() == '&') {
+            size_t entity_start = state.position;
+            state.advance();
+            
+            // 查找实体结束
+            while (!state.atEnd() && state.current() != ';' && state.current() != '<') {
+                state.advance();
+            }
+            
+            if (state.atEnd() || state.current() != ';') {
+                state.position = entity_start + 1;
+                accumulator.append('&');
+                continue;
+            }
+            
+            std::string_view entity = state.input.substr(entity_start, state.position - entity_start + 1);
+            
+            // 使用内联查找
+            if (entity == "&amp;") accumulator.append('&');
+            else if (entity == "&lt;") accumulator.append('<');
+            else if (entity == "&gt;") accumulator.append('>');
+            else if (entity == "&quot;") accumulator.append('"');
+            else if (entity == "&apos;") accumulator.append('\'');
+            else {
+                accumulator.append(entity);
+            }
+            
+            state.advance();  // 跳过 ';'
+            continue;
+        }
+        
+        // 批量复制普通字符
+        size_t seg_start = state.position;
+        while (!state.atEnd() && state.current() != '<' && state.current() != '&') {
+            state.advance();
+        }
+        
+        if (seg_start != state.position) {
+            accumulator.append(state.input.substr(seg_start, state.position - seg_start));
+        }
+    }
+    
+    if (accumulator.empty()) {
+        return ParseResult{ParseError::Success, "", std::nullopt};
+    }
+    
+    std::string_view text = accumulator.finalize();
+    
+    if (!m_config.preserveWhitespace && isWhitespaceOnly(text)) {
+        return ParseResult{ParseError::Success, "", std::nullopt};
+    }
+    
+    auto textNode = state.document->getAllocator().create<TextNode>(text);
+    parent->appendChild(textNode);
+    
+    return ParseResult{ParseError::Success, "", std::nullopt};
+}
+
+// ==================== 元素解析 ====================
 ParseResult XMLParser::parseElement(ParseState& state, DOMNode* parent) noexcept {
     if (state.current() != '<') return makeError(ParseError::InvalidTag, "Expected '<'", state.position);
     state.advance();
@@ -187,10 +318,10 @@ ParseResult XMLParser::parseElement(ParseState& state, DOMNode* parent) noexcept
 
     std::string_view tagName = *optTagName;
     if (state.tagStack.size() >= m_config.maxDepth) {
-        return makeError(ParseError::MalformedXML, std::format("Maximum nesting depth {} exceeded", m_config.maxDepth));
+        return makeError(ParseError::MalformedXML, 
+            std::format("Maximum nesting depth {} exceeded", m_config.maxDepth));
     }
 
-    // 使用内存池分配节点
     auto element = state.document->getAllocator().create<ElementNode>(tagName);
     
     auto result = parseAttributes(state, element);
@@ -199,7 +330,7 @@ ParseResult XMLParser::parseElement(ParseState& state, DOMNode* parent) noexcept
     if (state.current() == '/' && state.peek() == '>') {
         state.position += 2;
         parent->appendChild(element);
-        return ParseResult{ParseError::Success};
+        return ParseResult{ParseError::Success, "", std::nullopt};
     }
 
     if (state.current() != '>') return makeError(ParseError::InvalidTag, "Expected '>'", state.position);
@@ -217,7 +348,7 @@ ParseResult XMLParser::parseElement(ParseState& state, DOMNode* parent) noexcept
     if (!state.tagStack.empty() && state.tagStack.back() == tagName) {
         state.tagStack.pop_back();
     }
-    return ParseResult{ParseError::Success};
+    return ParseResult{ParseError::Success, "", std::nullopt};
 }
 
 ParseResult XMLParser::parseAttributes(ParseState& state, ElementNode* element) noexcept {
@@ -232,32 +363,20 @@ ParseResult XMLParser::parseAttributes(ParseState& state, ElementNode* element) 
         auto optValue = state.parseQuotedString();
         if (!optValue) return makeError(ParseError::InvalidAttribute, "Expected quoted attribute value", state.position);
 
-        std::string_view value = internOrOriginal(state, *optValue);
+        // 属性值中的实体解码
+        std::string_view value;
+        if (EntityTable::has_entity(*optValue)) {
+            // 使用实体解码
+            std::string decoded = EntityTable::decode_entities(*optValue);
+            value = state.document->getAllocator().intern(decoded);
+        } else {
+            value = *optValue;
+        }
+        
         element->setAttribute(*optName, value);
         state.skipWhitespace();
     }
-    return ParseResult{ParseError::Success};
-}
-
-ParseResult XMLParser::parseText(ParseState& state, DOMNode* parent) noexcept {
-    size_t start = state.position;
-    while (!state.atEnd() && state.current() != '<') {
-        state.advance();
-    }
-    if (start == state.position) return ParseResult{ParseError::Success};
-
-    std::string_view text = state.input.substr(start, state.position - start);
-    text = internOrOriginal(state, text); // 处理转义并池化
-
-    if (!m_config.preserveWhitespace) {
-        if (std::ranges::all_of(text, [](char c) { return std::isspace(static_cast<unsigned char>(c)); })) {
-            return ParseResult{ParseError::Success};
-        }
-    }
-
-    auto textNode = state.document->getAllocator().create<TextNode>(text);
-    parent->appendChild(textNode);
-    return ParseResult{ParseError::Success};
+    return ParseResult{ParseError::Success, "", std::nullopt};
 }
 
 ParseResult XMLParser::parseCDATA(ParseState& state, DOMNode* parent) noexcept {
@@ -270,7 +389,7 @@ ParseResult XMLParser::parseCDATA(ParseState& state, DOMNode* parent) noexcept {
                 state.position += 3;
                 auto cdataNode = state.document->getAllocator().create<CDataNode>(data);
                 parent->appendChild(cdataNode);
-                return ParseResult{ParseError::Success};
+                return ParseResult{ParseError::Success, "", std::nullopt};
             }
         }
         state.advance();
@@ -281,9 +400,10 @@ ParseResult XMLParser::parseCDATA(ParseState& state, DOMNode* parent) noexcept {
 ParseResult XMLParser::parseComment(ParseState& state, DOMNode* parent) noexcept {
     if (!m_config.parseComments) {
         size_t end = state.input.find("-->", state.position + 4);
-        if (end == std::string_view::npos) return makeError(ParseError::InvalidComment, "Unclosed comment", state.position);
+        if (end == std::string_view::npos) 
+            return makeError(ParseError::InvalidComment, "Unclosed comment", state.position);
         state.position = end + 3;
-        return ParseResult{ParseError::Success};
+        return ParseResult{ParseError::Success, "", std::nullopt};
     }
     state.position += 4;
     size_t start = state.position;
@@ -294,7 +414,7 @@ ParseResult XMLParser::parseComment(ParseState& state, DOMNode* parent) noexcept
                 state.position += 3;
                 auto commentNode = state.document->getAllocator().create<CommentNode>(comment);
                 parent->appendChild(commentNode);
-                return ParseResult{ParseError::Success};
+                return ParseResult{ParseError::Success, "", std::nullopt};
             }
         }
         state.advance();
@@ -307,9 +427,10 @@ ParseResult XMLParser::parseProcessingInstruction(ParseState& state, DOMNode* /*
     auto optTarget = state.parseName();
     if (!optTarget) return makeError(ParseError::InvalidProcessingInstruction, "Expected PI target", state.position);
     size_t end = state.input.find("?>", state.position);
-    if (end == std::string_view::npos) return makeError(ParseError::InvalidProcessingInstruction, "Unclosed PI", state.position);
+    if (end == std::string_view::npos) 
+        return makeError(ParseError::InvalidProcessingInstruction, "Unclosed PI", state.position);
     state.position = end + 2;
-    return ParseResult{ParseError::Success};
+    return ParseResult{ParseError::Success, "", std::nullopt};
 }
 
 ParseResult XMLParser::parseClosingTag(ParseState& state, std::string_view tagName) noexcept {
@@ -320,51 +441,17 @@ ParseResult XMLParser::parseClosingTag(ParseState& state, std::string_view tagNa
     auto optCloseName = state.parseName();
     if (!optCloseName) return makeError(ParseError::InvalidTag, "Expected closing tag name", state.position);
     if (*optCloseName != tagName) {
-        return makeError(ParseError::MismatchedTag, std::format("Closing tag mismatch: </{}> != </{}>", tagName, *optCloseName), state.position);
+        return makeError(ParseError::MismatchedTag, 
+            std::format("Closing tag mismatch: </{}> != </{}>", tagName, *optCloseName), state.position);
     }
     state.skipWhitespace();
     if (state.current() != '>') return makeError(ParseError::InvalidTag, "Expected '>'", state.position);
     state.advance();
-    return ParseResult{ParseError::Success};
+    return ParseResult{ParseError::Success, "", std::nullopt};
 }
 
-// ==================== 辅助函数 ====================
-std::string_view XMLParser::internOrOriginal(ParseState& state, std::string_view text) {
-    // 零拷贝优化：如果没有转义字符，直接返回原 buffer 的视图
-    if (text.find('&') == std::string_view::npos) {
-        return text;
-    }
-    // 如果有转义字符，解码后放入内存池
-    std::string unescaped = unescapeXML(text);
-    return state.document->getAllocator().intern(unescaped);
-}
-
-std::string XMLParser::unescapeXML(std::string_view text) const noexcept {
-    std::string result;
-    result.reserve(text.length());
-    size_t i = 0;
-    while (i < text.length()) {
-        if (text[i] == '&') {
-            if (text.substr(i).starts_with("&amp;")) { result += '&'; i += 5; }
-            else if (text.substr(i).starts_with("&lt;")) { result += '<'; i += 4; }
-            else if (text.substr(i).starts_with("&gt;")) { result += '>'; i += 4; }
-            else if (text.substr(i).starts_with("&quot;")) { result += '"'; i += 6; }
-            else if (text.substr(i).starts_with("&apos;")) { result += '\''; i += 6; }
-            else { result += '&'; i++; }
-        } else {
-            result += text[i];
-            i++;
-        }
-    }
-    return result;
-}
-
-bool XMLParser::isValidName(std::string_view name) const noexcept {
-    if (name.empty()) return false;
-    if (!std::isalpha(static_cast<unsigned char>(name[0])) && name[0] != '_') return false;
-    return std::ranges::all_of(name.substr(1), [](char c) {
-        return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.';
-    });
+ParseResult XMLParser::parseDocument(ParseState& state) noexcept {
+    return parseContent(state, state.document);
 }
 
 } // namespace litexml

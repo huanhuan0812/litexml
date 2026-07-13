@@ -1,3 +1,4 @@
+// dom_node.h
 #ifndef LITEXML_DOM_NODE_H
 #define LITEXML_DOM_NODE_H
 
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <iterator>
 #include <cstring>
+#include <cctype>  // 新增
 
 namespace litexml {
 
@@ -73,6 +75,14 @@ public:
     
     std::string_view intern(const std::string& str) {
         return intern(std::string_view(str));
+    }
+
+    // 新增：带预分配大小的 intern
+    std::string_view intern_with_size(std::string_view sv, size_t size_hint) {
+        if (sv.empty()) return {};
+        void* mem = allocate(size_hint, 1);
+        std::memcpy(mem, sv.data(), sv.size());
+        return std::string_view(static_cast<char*>(mem), sv.size());
     }
 };
 
