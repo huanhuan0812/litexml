@@ -11,7 +11,6 @@
 #include <concepts>
 #include <ranges>
 #include <algorithm>
-#include <iterator>
 #include <cstring>
 #include <cctype>
 
@@ -25,7 +24,7 @@ class DocumentAllocator {
         size_t used;
     };
     std::vector<Block> blocks;
-    static constexpr size_t DEFAULT_BLOCK_SIZE = 64 * 1024; // 64KB 块大小
+    static constexpr size_t DEFAULT_BLOCK_SIZE = 64 * 1024;
 
     void* allocate(size_t size, size_t alignment) {
         if (blocks.empty() || blocks.back().used + size + alignment > blocks.back().size) {
@@ -82,6 +81,20 @@ public:
     }
 };
 
+// ==================== 命名空间支持 ====================
+struct NamespaceInfo {
+    std::string_view prefix;
+    std::string_view uri;
+    
+    [[nodiscard]] bool matches(std::string_view p, std::string_view u) const noexcept {
+        return prefix == p && uri == u;
+    }
+    
+    [[nodiscard]] bool isDefault() const noexcept {
+        return prefix.empty();
+    }
+};
+
 // ==================== DOM 节点定义 ====================
 enum class NodeType : uint8_t {
     Document, Element, Text, CData, Comment, ProcessingInstruction
@@ -130,7 +143,6 @@ public:
         return children.back();
     }
 
-    // ==================== 新增：DOM 遍历方法 ====================
     [[nodiscard]] DOMNode* getParent() const noexcept {
         return parent;
     }
@@ -157,14 +169,13 @@ public:
         return std::nullopt;
     }
 
-    // ==================== 新增：DOM 修改方法 ====================
     bool removeChild(DOMNode* child) {
         if (!child) return false;
         auto it = std::find(children.begin(), children.end(), child);
         if (it != children.end()) {
             children.erase(it);
             child->parent = nullptr;
-            child->~DOMNode(); // 手动调用虚析构函数释放派生类资源
+            child->~DOMNode();
             return true;
         }
         return false;
@@ -201,14 +212,73 @@ public:
 class ElementNode : public DOMNode {
 private:
     AttributeMap m_attributes;
+    std::vector<NamespaceInfo> m_namespace_declarations;
+    std::optional<std::string_view> m_namespace_uri;
+    std::optional<std::string_view> m_prefix_cache;
+    
 public:
     explicit ElementNode(std::string_view name) : DOMNode(NodeType::Element) {
         nodeName = name;
+        size_t colon_pos = name.find(':');
+        if (colon_pos != std::string_view::npos) {
+            m_prefix_cache = name.substr(0, colon_pos);
+        }
     }
     
-    ~ElementNode() override = default; 
+    ~ElementNode() override = default;
 
     [[nodiscard]] std::string_view getTagName() const noexcept { return nodeName; }
+    
+    [[nodiscard]] std::string_view getLocalName() const {
+        size_t colon_pos = nodeName.find(':');
+        if (colon_pos != std::string_view::npos) {
+            return nodeName.substr(colon_pos + 1);
+        }
+        return nodeName;
+    }
+    
+    [[nodiscard]] std::optional<std::string_view> getPrefix() const {
+        return m_prefix_cache;
+    }
+    
+    [[nodiscard]] std::optional<std::string_view> getNamespaceUri() const {
+        if (m_namespace_uri.has_value()) {
+            return m_namespace_uri;
+        }
+        return std::nullopt;
+    }
+    
+    void setNamespaceUri(std::string_view uri) {
+        m_namespace_uri = uri;
+    }
+    
+    [[nodiscard]] const std::vector<NamespaceInfo>& getNamespaceDeclarations() const noexcept {
+        return m_namespace_declarations;
+    }
+    
+    void addNamespaceDeclaration(std::string_view prefix, std::string_view uri) {
+        for (auto& ns : m_namespace_declarations) {
+            if (ns.prefix == prefix) {
+                ns.uri = uri;
+                return;
+            }
+        }
+        m_namespace_declarations.push_back({prefix, uri});
+    }
+    
+    [[nodiscard]] bool hasDefaultNamespace() const noexcept {
+        return std::ranges::any_of(m_namespace_declarations, 
+            [](const auto& ns) { return ns.prefix.empty(); });
+    }
+    
+    [[nodiscard]] std::optional<std::string_view> getDefaultNamespace() const {
+        auto it = std::ranges::find_if(m_namespace_declarations, 
+            [](const auto& ns) { return ns.prefix.empty(); });
+        if (it != m_namespace_declarations.end()) {
+            return it->uri;
+        }
+        return std::nullopt;
+    }
 
     [[nodiscard]] std::optional<std::string_view> getAttribute(std::string_view name) const {
         auto it = m_attributes.find(name);
@@ -267,7 +337,6 @@ private:
         }
     }
 
-    // 查询辅助方法
     void findElementsById(const DOMNode* node, std::string_view id, ElementNode*& result) const {
         if (!node || result) return;
         if (node->type == NodeType::Element) {
@@ -294,6 +363,23 @@ private:
         }
         for (auto* child : node->children) {
             findElementsByTagName(child, tagName, result);
+        }
+    }
+    
+    void findElementsByTagNameNS(const DOMNode* node, std::string_view namespaceUri, 
+                                  std::string_view localName, std::vector<ElementNode*>& result) const {
+        if (!node) return;
+        if (node->type == NodeType::Element) {
+            auto* elem = static_cast<const ElementNode*>(node);
+            if (elem->getLocalName() == localName) {
+                auto uri = elem->getNamespaceUri();
+                if (uri.has_value() && uri.value() == namespaceUri) {
+                    result.push_back(const_cast<ElementNode*>(elem));
+                }
+            }
+        }
+        for (auto* child : node->children) {
+            findElementsByTagNameNS(child, namespaceUri, localName, result);
         }
     }
 
@@ -332,7 +418,6 @@ public:
         | std::views::transform([](const auto& child) -> ElementNode* { return static_cast<ElementNode*>(child); });
     }
 
-    // ==================== 新增：DOM 查询方法 ====================
     [[nodiscard]] ElementNode* getElementById(std::string_view id) const {
         ElementNode* result = nullptr;
         findElementsById(this, id, result);
@@ -342,6 +427,13 @@ public:
     [[nodiscard]] std::vector<ElementNode*> getElementsByTagName(std::string_view tagName) const {
         std::vector<ElementNode*> result;
         findElementsByTagName(this, tagName, result);
+        return result;
+    }
+    
+    [[nodiscard]] std::vector<ElementNode*> getElementsByTagNameNS(std::string_view namespaceUri, 
+                                                                    std::string_view localName) const {
+        std::vector<ElementNode*> result;
+        findElementsByTagNameNS(this, namespaceUri, localName, result);
         return result;
     }
 

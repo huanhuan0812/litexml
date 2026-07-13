@@ -14,10 +14,11 @@ public:
     struct Config {
         bool prettyPrint{false};
         std::string indentString{"  "}; 
-        bool writeProlog{true};         
+        bool writeProlog{true};
+        bool writeNamespaces{true};
+        bool useQualifiedNames{true};
     };
 
-    // 【修复】：拆分为默认构造和带参构造，解决 Clang 的 {} 解析限制
     XMLSerializer() = default;
     explicit XMLSerializer(const Config& config) : m_config(config) {}
 
@@ -84,9 +85,32 @@ private:
 
     void serializeElement(const ElementNode* elem, std::string& out, int depth) const {
         out += '<';
-        out += elem->getTagName();
+        
+        if (m_config.useQualifiedNames) {
+            out += elem->getTagName();
+        } else {
+            out += elem->getLocalName();
+        }
+
+        if (m_config.writeNamespaces) {
+            for (const auto& ns : elem->getNamespaceDeclarations()) {
+                out += ' ';
+                if (ns.prefix.empty()) {
+                    out += "xmlns";
+                } else {
+                    out += "xmlns:";
+                    out += ns.prefix;
+                }
+                out += "=\"";
+                out += ns.uri;
+                out += '"';
+            }
+        }
 
         for (const auto& [key, value] : elem->getAttributes()) {
+            if (m_config.writeNamespaces && (key == "xmlns" || key.starts_with("xmlns:"))) {
+                continue;
+            }
             out += ' ';
             out += key;
             out += "=\"";
@@ -111,7 +135,12 @@ private:
                 for (int i = 0; i < depth; ++i) out += m_config.indentString;
             }
             out += "</";
-            out += elem->getTagName();
+            
+            if (m_config.useQualifiedNames) {
+                out += elem->getTagName();
+            } else {
+                out += elem->getLocalName();
+            }
             out += '>';
         }
     }

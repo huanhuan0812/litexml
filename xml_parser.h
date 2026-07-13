@@ -10,7 +10,6 @@
 #include <expected>
 #include <vector>
 #include <format>
-#include <fstream>
 #include <optional>
 
 namespace litexml {
@@ -43,6 +42,7 @@ public:
         bool parseComments{false};
         bool parseProcessingInstructions{false};
         bool strictMode{true};
+        bool parseNamespaces{true};
         size_t maxDepth{1000};
     };
 
@@ -62,16 +62,15 @@ private:
         Config config;
         DocumentNode* document;
         std::vector<std::string_view> tagStack;
-        TextAccumulator text_accumulator;  // 直接成员，避免指针开销
+        TextAccumulator text_accumulator;
         
         explicit ParseState(std::string_view xml, const Config& cfg, DocumentNode* doc)
             : input(xml), config(cfg), document(doc), 
               text_accumulator(&doc->getAllocator()) {
             tagStack.reserve(32);
-            text_accumulator.reserve(2048);  // 预分配更大缓冲区
+            text_accumulator.reserve(2048);
         }
         
-        // 获取文本累加器（自动重置）
         inline TextAccumulator& get_text_accumulator() {
             text_accumulator.clear();
             return text_accumulator;
@@ -121,11 +120,17 @@ private:
     ParseResult parseAttributes(ParseState& state, ElementNode* element) noexcept;
     ParseResult parseClosingTag(ParseState& state, std::string_view tagName) noexcept;
 
-    // 辅助方法
+    void resolveElementNamespace(ParseState& state, ElementNode* element) noexcept;
+    std::optional<std::string_view> resolveNamespace(ParseState& state, ElementNode* element, 
+                                                      std::string_view prefix) noexcept;
+
     [[nodiscard]] inline bool isWhitespaceOnly(std::string_view text) const noexcept;
     [[nodiscard]] bool isValidName(std::string_view name) const noexcept;
     ParseResult makeError(ParseError error, std::string_view message, 
                           std::optional<size_t> pos = std::nullopt) const noexcept;
+    void resolveElementNamespace(ParseState& state, ElementNode* element, DOMNode* parent) noexcept;
+    std::optional<std::string_view> resolveNamespace(ParseState& state, ElementNode* element, 
+    DOMNode* parent, std::string_view prefix) noexcept;
 };
 
 } // namespace litexml

@@ -2,7 +2,6 @@
 #include "xml_parser.h"
 #include "entity_table.h"
 #include <fstream>
-#include <sstream>
 #include <cctype>
 #include <algorithm>
 #include <format>
@@ -28,7 +27,7 @@ std::optional<std::string_view> XMLParser::ParseState::parseName() noexcept {
     advance();
     while (!atEnd()) {
         c = current();
-        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.') {
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.' || c == ':') {
             advance();
         } else {
             break;
@@ -78,7 +77,7 @@ bool XMLParser::isValidName(std::string_view name) const noexcept {
     if (name.empty()) return false;
     if (!std::isalpha(static_cast<unsigned char>(name[0])) && name[0] != '_') return false;
     return std::ranges::all_of(name.substr(1), [](char c) {
-        return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.';
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.' || c == ':';
     });
 }
 
@@ -208,12 +207,9 @@ ParseResult XMLParser::parseContent(ParseState& state, DOMNode* parent) noexcept
 
 // ==================== 优化后的文本解析 ====================
 ParseResult XMLParser::parseTextOptimized(ParseState& state, DOMNode* parent) noexcept {
-    // 快速检测：是否包含实体
     size_t start = state.position;
     bool has_entity = false;
     
-    // 第一遍：快速扫描，只找 '&'
-    // size_t scan_pos = state.position;
     while (!state.atEnd() && state.current() != '<') {
         if (state.current() == '&') {
             has_entity = true;
@@ -222,9 +218,7 @@ ParseResult XMLParser::parseTextOptimized(ParseState& state, DOMNode* parent) no
         state.advance();
     }
     
-    // 如果没有实体，直接使用零拷贝
     if (!has_entity) {
-        // 回退到开始位置，重新提取文本
         state.position = start;
         while (!state.atEnd() && state.current() != '<') {
             state.advance();
@@ -236,7 +230,6 @@ ParseResult XMLParser::parseTextOptimized(ParseState& state, DOMNode* parent) no
         
         std::string_view text = state.input.substr(start, state.position - start);
         
-        // 空白处理
         if (!m_config.preserveWhitespace && isWhitespaceOnly(text)) {
             return ParseResult{ParseError::Success, "", std::nullopt};
         }
@@ -246,8 +239,7 @@ ParseResult XMLParser::parseTextOptimized(ParseState& state, DOMNode* parent) no
         return ParseResult{ParseError::Success, "", std::nullopt};
     }
     
-    // 有实体，需要解码
-    state.position = start;  // 重置位置
+    state.position = start;
     auto& accumulator = state.get_text_accumulator();
     
     while (!state.atEnd() && state.current() != '<') {
@@ -255,7 +247,6 @@ ParseResult XMLParser::parseTextOptimized(ParseState& state, DOMNode* parent) no
             size_t entity_start = state.position;
             state.advance();
             
-            // 查找实体结束
             while (!state.atEnd() && state.current() != ';' && state.current() != '<') {
                 state.advance();
             }
@@ -268,7 +259,6 @@ ParseResult XMLParser::parseTextOptimized(ParseState& state, DOMNode* parent) no
             
             std::string_view entity = state.input.substr(entity_start, state.position - entity_start + 1);
             
-            // 使用内联查找
             if (entity == "&amp;") accumulator.append('&');
             else if (entity == "&lt;") accumulator.append('<');
             else if (entity == "&gt;") accumulator.append('>');
@@ -278,11 +268,10 @@ ParseResult XMLParser::parseTextOptimized(ParseState& state, DOMNode* parent) no
                 accumulator.append(entity);
             }
             
-            state.advance();  // 跳过 ';'
+            state.advance();
             continue;
         }
         
-        // 批量复制普通字符
         size_t seg_start = state.position;
         while (!state.atEnd() && state.current() != '<' && state.current() != '&') {
             state.advance();
@@ -309,6 +298,102 @@ ParseResult XMLParser::parseTextOptimized(ParseState& state, DOMNode* parent) no
     return ParseResult{ParseError::Success, "", std::nullopt};
 }
 
+// ==================== 命名空间解析 ====================
+std::optional<std::string_view> XMLParser::resolveNamespace(ParseState& state, 
+                                                             ElementNode* element, 
+                                                             DOMNode* parent,
+                                                             std::string_view prefix) noexcept {
+    (void)state; // 避免未使用警告
+    // 1. 检查元素自身的命名空间声明
+    for (const auto& ns : element->getNamespaceDeclarations()) {
+        if (ns.prefix == prefix) {
+            return ns.uri;
+        }
+    }
+
+    
+    // 2. 递归检查父节点链（从传入的 parent 开始）
+    DOMNode* currentParent = parent;
+    while (currentParent) {
+        if (currentParent->type == NodeType::Element) {
+            auto* parentElem = static_cast<ElementNode*>(currentParent);
+            for (const auto& ns : parentElem->getNamespaceDeclarations()) {
+                if (ns.prefix == prefix) {
+                    return ns.uri;
+                }
+            }
+        }
+        currentParent = currentParent->getParent();
+    }
+    
+    // 3. 检查 DOM 树中的父节点
+    DOMNode* domParent = element->getParent();
+    while (domParent) {
+        if (domParent->type == NodeType::Element) {
+            auto* parentElem = static_cast<ElementNode*>(domParent);
+            for (const auto& ns : parentElem->getNamespaceDeclarations()) {
+                if (ns.prefix == prefix) {
+                    return ns.uri;
+                }
+            }
+        }
+        domParent = domParent->getParent();
+    }
+    
+    return std::nullopt;
+}
+
+void XMLParser::resolveElementNamespace(ParseState& state, ElementNode* element, DOMNode* parent) noexcept {
+    if (!m_config.parseNamespaces) {
+        return;
+    }
+    
+    auto prefix = element->getPrefix();
+    
+    if (prefix.has_value()) {
+        auto uri = resolveNamespace(state, element, parent, prefix.value());
+        if (uri.has_value()) {
+            element->setNamespaceUri(uri.value());
+        }
+    } else {
+        // 无前缀：检查默认命名空间
+        // 首先检查元素自身的默认命名空间声明
+        auto defaultNs = element->getDefaultNamespace();
+        if (defaultNs.has_value()) {
+            element->setNamespaceUri(defaultNs.value());
+            return;
+        }
+        
+        // 递归检查父节点链
+        DOMNode* currentParent = parent;
+        while (currentParent) {
+            if (currentParent->type == NodeType::Element) {
+                auto* parentElem = static_cast<ElementNode*>(currentParent);
+                auto parentDefault = parentElem->getDefaultNamespace();
+                if (parentDefault.has_value()) {
+                    element->setNamespaceUri(parentDefault.value());
+                    return;
+                }
+            }
+            currentParent = currentParent->getParent();
+        }
+        
+        // 检查 DOM 树中的父节点
+        DOMNode* domParent = element->getParent();
+        while (domParent) {
+            if (domParent->type == NodeType::Element) {
+                auto* parentElem = static_cast<ElementNode*>(domParent);
+                auto parentDefault = parentElem->getDefaultNamespace();
+                if (parentDefault.has_value()) {
+                    element->setNamespaceUri(parentDefault.value());
+                    return;
+                }
+            }
+            domParent = domParent->getParent();
+        }
+    }
+}
+
 // ==================== 元素解析 ====================
 ParseResult XMLParser::parseElement(ParseState& state, DOMNode* parent) noexcept {
     if (state.current() != '<') return makeError(ParseError::InvalidTag, "Expected '<'", state.position);
@@ -327,16 +412,20 @@ ParseResult XMLParser::parseElement(ParseState& state, DOMNode* parent) noexcept
     auto result = parseAttributes(state, element);
     if (!result.isSuccess()) return result;
 
+    // 先添加到父节点，这样 getParent() 就能正确工作
+    parent->appendChild(element);
+
+    // 然后解析命名空间（此时 element->getParent() 返回正确的父节点）
+    resolveElementNamespace(state, element, parent);
+
     if (state.current() == '/' && state.peek() == '>') {
         state.position += 2;
-        parent->appendChild(element);
         return ParseResult{ParseError::Success, "", std::nullopt};
     }
 
     if (state.current() != '>') return makeError(ParseError::InvalidTag, "Expected '>'", state.position);
     state.advance();
 
-    parent->appendChild(element);
     state.tagStack.push_back(tagName);
 
     result = parseContent(state, element);
@@ -363,17 +452,32 @@ ParseResult XMLParser::parseAttributes(ParseState& state, ElementNode* element) 
         auto optValue = state.parseQuotedString();
         if (!optValue) return makeError(ParseError::InvalidAttribute, "Expected quoted attribute value", state.position);
 
-        // 属性值中的实体解码
         std::string_view value;
         if (EntityTable::has_entity(*optValue)) {
-            // 使用实体解码
             std::string decoded = EntityTable::decode_entities(*optValue);
             value = state.document->getAllocator().intern(decoded);
         } else {
             value = *optValue;
         }
         
-        element->setAttribute(*optName, value);
+        std::string_view attrName = *optName;
+        
+        if (attrName == "xmlns") {
+            element->addNamespaceDeclaration(std::string_view{}, value);
+            if (!element->getPrefix().has_value()) {
+                element->setNamespaceUri(value);
+            }
+        } else if (attrName.starts_with("xmlns:")) {
+            std::string_view prefix = attrName.substr(6);
+            element->addNamespaceDeclaration(prefix, value);
+            
+            auto elemPrefix = element->getPrefix();
+            if (elemPrefix.has_value() && elemPrefix.value() == prefix) {
+                element->setNamespaceUri(value);
+            }
+        }
+        
+        element->setAttribute(attrName, value);
         state.skipWhitespace();
     }
     return ParseResult{ParseError::Success, "", std::nullopt};
