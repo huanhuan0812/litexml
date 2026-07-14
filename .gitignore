@@ -3,3 +3,4 @@ build/
 release/
 TODO
 stream_release/
+*.xml
