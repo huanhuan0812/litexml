@@ -18,12 +18,12 @@ endif()
 
 set(CMAKE_CONFIGURATION_TYPES Debug Release RelWithDebInfo MinSizeRel CACHE STRING "" FORCE)
 
-# ==================== 导出宏定义 ====================
-configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/litexml_export.h.in
-    ${CMAKE_CURRENT_BINARY_DIR}/litexml_export.h
-    @ONLY
-)
+# # ==================== 导出宏定义 ====================
+# configure_file(
+#     ${CMAKE_CURRENT_SOURCE_DIR}/litexml_export.h.in
+#     ${CMAKE_CURRENT_BINARY_DIR}/litexml_export.h
+#     @ONLY
+# )
 
 # ==================== 编译器和平台检测 ====================
 if(MSVC)
@@ -138,6 +138,9 @@ set(LITEXML_HEADERS
     dom_node.h
     entity_table.h
     xml_parser.h
+    xml_stream.hpp
+    litexml.h
+    litexml_stream.h
 )
 
 # ==================== 构建静态库 ====================

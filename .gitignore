@@ -3,3 +3,4 @@ build/
 release/
 stream_release/
 *.xml
+.DS_Store
